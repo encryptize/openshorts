@@ -35,8 +35,8 @@ shrinks a screen into an unreadable strip.
 import json
 import os
 
+import llm_backend
 import numpy as np
-
 ENABLED = os.environ.get("SCREENCAST_LAYOUT", "0") == "1"
 
 # Fraction of the frame width the content must span. A corner ticker, logo or
@@ -325,17 +325,16 @@ def detect_content_ranges(video_path, scenes, fps):
         return []
     if not scenes:
         return None
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("   ⚠️ Screen check needs GEMINI_API_KEY.")
-        return None
+    use_local = llm_backend.active()
+    if not use_local:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            print("   ⚠️ Screen check needs GEMINI_API_KEY.")
+            return None
 
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     asked = shots_to_ask(scenes)
     print(f"   🔎 Screen check on {len(asked)} shot(s)…")
     try:
-        from google import genai
-        from google.genai import types as genai_types
         import gemini_worker
 
         frames = _shot_frames(video_path, scenes, asked)
@@ -343,20 +342,36 @@ def detect_content_ranges(video_path, scenes, fps):
         if not keep:
             print("   ⚠️ No readable frames for the screen check.")
             return None
-        parts = []
-        for n, (_, jpg) in enumerate(keep):
-            parts.append(f"Shot {n}:")
-            parts.append(genai_types.Part.from_bytes(data=jpg, mime_type="image/jpeg"))
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model_name,
-            contents=parts + [gemini_worker.SHOT_CONTENT_PROMPT],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=gemini_worker.ShotContentResponse,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        raw = (json.loads(response.text) or {}).get("shots") or []
+
+        if use_local:
+            # OpenAI-compatible vision endpoint (OpenRouter, Ollama, vLLM, …).
+            parts = []
+            for n, (_, jpg) in enumerate(keep):
+                parts.append(f"Shot {n}:")
+                parts.append(jpg)
+            parsed, _ = llm_backend.generate_json_vision(
+                parts + [gemini_worker.SHOT_CONTENT_PROMPT],
+                gemini_worker.ShotContentResponse)
+            raw = parsed.get("shots") or []
+        else:
+            from google import genai
+            from google.genai import types as genai_types
+
+            model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+            parts = []
+            for n, (_, jpg) in enumerate(keep):
+                parts.append(f"Shot {n}:")
+                parts.append(genai_types.Part.from_bytes(data=jpg, mime_type="image/jpeg"))
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=parts + [gemini_worker.SHOT_CONTENT_PROMPT],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=gemini_worker.ShotContentResponse,
+                ))
+            gemini_worker.raise_if_blocked(response)
+            raw = (json.loads(response.text) or {}).get("shots") or []
     except Exception as e:
         print(f"   ⚠️ Screen check failed ({e}).")
         return None

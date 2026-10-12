@@ -149,3 +149,88 @@ def test_score_batch_shrinks_for_local_models(local, monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL")
     monkeypatch.delenv("LLM_SCORE_BATCH")
     assert main.score_batch_size() == 8
+
+
+# --- vision support -------------------------------------------------------
+
+def test_vision_model_falls_back_to_llm_model(local, monkeypatch):
+    monkeypatch.delenv("LLM_VISION_MODEL", raising=False)
+    assert llm_backend.vision_model_name() == llm_backend.model_name()
+
+
+def test_vision_model_env_overrides(local, monkeypatch):
+    monkeypatch.setenv("LLM_VISION_MODEL", "qwen2.5-vl:32b")
+    assert llm_backend.vision_model_name() == "qwen2.5-vl:32b"
+
+
+def test_generate_json_vision_sends_image_parts(local, monkeypatch):
+    """Bytes become base64 image_url parts; strings become text parts."""
+    seen = {}
+
+    def handler(req):
+        body = json.loads(req.read())
+        seen["model"] = body["model"]
+        user_content = body["messages"][1]["content"]
+        assert isinstance(user_content, list)
+        seen["parts"] = user_content
+        return _completion({"layout": "none", "why": "test", "confidence": 0.5})
+
+    _serve(handler, monkeypatch)
+    parsed, cost = llm_backend.generate_json_vision(
+        [b"\xff\xd8fake", "pick a layout"], gemini_worker.LayoutChoice)
+    assert parsed["layout"] == "none"
+    assert cost["local"] is True
+
+    parts = seen["parts"]
+    assert len(parts) == 2
+    assert parts[0]["type"] == "image_url"
+    assert parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert parts[1]["type"] == "text"
+    assert parts[1]["text"] == "pick a layout"
+
+
+def test_generate_json_vision_handles_mixed_contents(local, monkeypatch):
+    """Screencast pattern: interleaved text labels and JPEG frames."""
+    seen = {}
+
+    def handler(req):
+        body = json.loads(req.read())
+        seen["parts"] = body["messages"][1]["content"]
+        return _completion({"shots": []})
+
+    _serve(handler, monkeypatch)
+    llm_backend.generate_json_vision(
+        ["Shot 0:", b"\xff\xd8img0", "Shot 1:", b"\xff\xd8img1", "describe"],
+        gemini_worker.ShotContentResponse)
+
+    parts = seen["parts"]
+    assert len(parts) == 5
+    assert parts[0] == {"type": "text", "text": "Shot 0:"}
+    assert parts[1]["type"] == "image_url"
+    assert parts[2] == {"type": "text", "text": "Shot 1:"}
+    assert parts[3]["type"] == "image_url"
+    assert parts[4] == {"type": "text", "text": "describe"}
+
+
+def test_generate_json_vision_validates_schema(local, monkeypatch):
+    """A response missing a required field raises instead of leaking through."""
+    _serve(lambda r: _completion({"layout": "none"}), monkeypatch)  # missing why, confidence
+    with pytest.raises(Exception) as exc:
+        llm_backend.generate_json_vision(
+            [b"\xff\xd8fake", "prompt"], gemini_worker.LayoutChoice)
+    assert "validation error" in str(exc.value)
+
+
+def test_generate_json_vision_uses_vision_model(local, monkeypatch):
+    """When LLM_VISION_MODEL is set, it is used for vision calls."""
+    monkeypatch.setenv("LLM_VISION_MODEL", "claude-3.5-sonnet")
+    seen = {}
+
+    def handler(req):
+        body = json.loads(req.read())
+        seen["model"] = body["model"]
+        return _completion({"layout": "none", "why": "x", "confidence": 0.1})
+
+    _serve(handler, monkeypatch)
+    llm_backend.generate_json_vision([b"\xff\xd8fake", "p"], gemini_worker.LayoutChoice)
+    assert seen["model"] == "claude-3.5-sonnet"

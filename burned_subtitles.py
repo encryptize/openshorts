@@ -25,6 +25,19 @@ renders exactly as it did before this module existed.
 import json
 import os
 
+from pydantic import BaseModel
+
+import llm_backend
+
+
+class FrameSubtitle(BaseModel):
+    frame: int
+    subtitle_top: float | None
+
+
+class SubtitleAnswer(BaseModel):
+    frames: list[FrameSubtitle]
+
 ENABLED = os.environ.get("SUBTITLE_BAND_CHECK", "1").strip() != "0"
 
 # Subtitles must be in at least this share of the readable frames. Lines come
@@ -101,40 +114,39 @@ def detect(video_path, frames=None):
     """
     if not ENABLED:
         return None
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return None
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     try:
-        from google import genai
-        from google.genai import types as genai_types
-        from pydantic import BaseModel
-
         import gemini_worker
         import layout_picker
-
-        class FrameSubtitle(BaseModel):
-            frame: int
-            subtitle_top: float | None
-
-        class SubtitleAnswer(BaseModel):
-            frames: list[FrameSubtitle]
 
         frames = frames if frames is not None else layout_picker.sample_frames(video_path)
         if not frames:
             return None
-        client = genai.Client(api_key=api_key)
-        parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
-                 for b in frames]
-        response = client.models.generate_content(
-            model=model_name,
-            contents=parts + [PROMPT],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=SubtitleAnswer,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        answer = json.loads(response.text) or {}
+
+        if llm_backend.active():
+            # OpenAI-compatible vision endpoint (OpenRouter, Ollama, vLLM, …).
+            parsed, _ = llm_backend.generate_json_vision(
+                frames + [PROMPT], SubtitleAnswer)
+            answer = parsed
+        else:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                return None
+            from google import genai
+            from google.genai import types as genai_types
+
+            model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+            client = genai.Client(api_key=api_key)
+            parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
+                     for b in frames]
+            response = client.models.generate_content(
+                model=model_name,
+                contents=parts + [PROMPT],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=SubtitleAnswer,
+                ))
+            gemini_worker.raise_if_blocked(response)
+            answer = json.loads(response.text) or {}
     except Exception as e:
         print(f"   ⚠️ Burned-in subtitle check failed ({e}) — captions as usual.")
         return None

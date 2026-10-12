@@ -124,6 +124,27 @@ class TestDetectContentRanges:
         assert screencast_layout.detect_content_ranges(
             "x.mp4", scenes_of((0, 30)), 30.0) is None
 
+    def test_llm_backend_routes_without_gemini_key(self, monkeypatch):
+        """When llm_backend is active, detect_content_ranges uses it."""
+        monkeypatch.setattr(screencast_layout, "ENABLED", True)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("LLM_BASE_URL", "http://llm.test/v1")
+        monkeypatch.setattr(screencast_layout, "_shot_frames",
+                            lambda vp, sc, asked: [b"\xff\xd8jpg"] * len(asked))
+
+        called = {}
+        def fake_vision(contents, schema, model=None):
+            called["schema"] = schema.__name__
+            return {"shots": [{"shot": 0, "kind": "screen",
+                               "focus_left": 0.0, "focus_right": 1.0}]}, {}
+        monkeypatch.setattr(screencast_layout.llm_backend, "generate_json_vision",
+                            fake_vision)
+
+        result = screencast_layout.detect_content_ranges(
+            "x.mp4", scenes_of((0, 30)), 30.0)
+        assert result is not None
+        assert called["schema"] == "ShotContentResponse"
+
 
 class TestShotVerdicts:
     def test_parse_keeps_known_kinds_and_clamps_focus(self):

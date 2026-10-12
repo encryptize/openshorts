@@ -118,6 +118,23 @@ def test_without_a_gemini_key_the_transcript_hook_stands(monkeypatch):
     assert clip["viral_hook_text"] == "old" and "hook_grounding" not in clip
 
 
+def test_llm_backend_runs_without_gemini_key(monkeypatch):
+    """When llm_backend is active, reground runs even without a Gemini key."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.test/v1")
+    monkeypatch.setattr(hg, "frames_at", lambda *a, **k: [b"jpg"])
+    monkeypatch.setattr(hg, "_ask_gemini",
+                        lambda frames, prompt, api_key=None: {
+                            "viral_hook_text": "new hook",
+                            "video_title_for_youtube_short": "new title",
+                            "on_screen": "a settings dialog"})
+    clip = {"viral_hook_text": "old", "layout_ranges": SCREEN}
+    result = hg.reground("clip.mp4", clip, {"segments": []}, 0, 30)
+    assert result is not None
+    assert clip["viral_hook_text"] == "new hook"
+    assert clip["video_title_for_youtube_short"] == "new title"
+
+
 def test_model_failure_never_touches_the_clip(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setattr(hg, "frames_at", lambda *a, **k: [b"jpg"])

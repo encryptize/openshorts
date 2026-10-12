@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket } from 'lucide-react';
 import KeyInput from './components/KeyInput';
+import LlmConfigInput from './components/LlmConfigInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
 import ResultCard from './components/ResultCard';
@@ -293,6 +294,9 @@ function App() {
   const [durableClips, setDurableClips] = useState({});
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  const [llmConfig, setLlmConfig] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('llm_config') || 'null'); } catch { return null; }
+  });
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -733,6 +737,11 @@ function App() {
   }, [apiKey]);
 
   useEffect(() => {
+    if (llmConfig) localStorage.setItem('llm_config', JSON.stringify(llmConfig));
+    else localStorage.removeItem('llm_config');
+  }, [llmConfig]);
+
+  useEffect(() => {
     if (uploadPostKey) {
       localStorage.setItem('uploadPostKey_v3', encrypt(uploadPostKey));
     }
@@ -875,7 +884,7 @@ function App() {
   // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
   // A self-hosted server running the moment picker on a local LLM
   // (LLM_BASE_URL) does not need a Gemini key for the core pipeline.
-  const geminiOk = !!apiKey || !!localLlm;
+  const geminiOk = !!apiKey || !!localLlm || !!llmConfig;
   const keysMissing = !billingEnabled && !geminiOk;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
@@ -1057,9 +1066,15 @@ function App() {
 
     try {
       let body;
-      // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically.
-      const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+      // BYOK sends the Gemini and/or LLM headers; managed users rely on the
+      // bearer token that apiFetch attaches automatically.
+      const headers = {};
+      if (apiKey) headers['X-Gemini-Key'] = apiKey;
+      if (llmConfig) {
+        if (llmConfig.apiKey) headers['X-LLM-Key'] = llmConfig.apiKey;
+        if (llmConfig.baseUrl) headers['X-LLM-Base-URL'] = llmConfig.baseUrl;
+        if (llmConfig.model) headers['X-LLM-Model'] = llmConfig.model;
+      }
 
       // Advanced generation controls: only sent when the user set them, so the
       // default request stays byte-identical to the pre-feature one.
@@ -1513,7 +1528,7 @@ function App() {
               >
                 <AlertTriangle size={12} />
                 <span className="hidden md:inline">
-                  {'Gemini API Key Missing'}
+                  {'API Key Missing'}
                 </span>
                 <span className="md:hidden">keys missing</span>
               </button>
@@ -1529,7 +1544,7 @@ function App() {
               <div className="min-w-0">
                 <span className="font-medium text-ink">Required API keys missing.</span>{' '}
                 <span className="text-muted">
-                  {'Set your Gemini API key to use OpenShorts.'}
+                  {'Set your Gemini or OpenRouter API key to use OpenShorts.'}
                 </span>
               </div>
             </div>
@@ -1630,6 +1645,7 @@ function App() {
               ) : (
                 <>
               <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <LlmConfigInput onSave={setLlmConfig} onClear={() => setLlmConfig(null)} savedConfig={llmConfig} />
 
               <div className="card p-4 sm:p-6 mt-8">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
@@ -2347,7 +2363,7 @@ function App() {
         isOpen={showKeyModal}
         onClose={() => setShowKeyModal(false)}
         eyebrow="SETUP"
-        title="Gemini API Key Required"
+        title="API Key Required"
         footer={
           <div className="flex gap-3">
             <button
@@ -2367,7 +2383,7 @@ function App() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted">
-            OpenShorts needs a <strong className="text-ink2">Gemini</strong> API key to generate clips. It has a free tier.
+            OpenShorts needs a <strong className="text-ink2">Gemini</strong> API key to generate clips — or use <strong className="text-ink2">OpenRouter</strong> / any OpenAI-compatible model.
           </p>
 
           {/* Gemini block */}
@@ -2395,6 +2411,20 @@ function App() {
                   }}
                 />
               </>
+            )}
+          </div>
+
+          {/* OpenRouter / Custom LLM block */}
+          <div className={`rounded-input p-4 space-y-2 border ${!llmConfig ? 'border-rule2' : 'border-rule opacity-70'}`}>
+            <p className="text-xs font-medium text-ink flex items-center gap-2">
+              {llmConfig ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
+              <Bot size={12} /> Custom LLM / OpenRouter {llmConfig && <span className="text-ok">— set</span>}
+            </p>
+            {!llmConfig && (
+              <p className="text-xs text-muted">
+                Use any OpenAI-compatible model instead of Gemini. Configure in Settings
+                with your API key, base URL, and model name.
+              </p>
             )}
           </div>
         </div>

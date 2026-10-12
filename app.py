@@ -186,6 +186,23 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     return os.environ.get("GEMINI_API_KEY")
 
 
+def _llm_headers(request: Request) -> dict:
+    """LLM config from BYOK headers (self-host only).
+
+    Returns ``{"key": ..., "base_url": ..., "model": ...}`` where any field may
+    be ``None``. Cloud mode returns all-``None`` (no BYOK LLM — same policy as
+    Gemini BYOK). These are injected into the child-process env alongside the
+    server-level ``LLM_*`` vars so ``llm_backend.active()`` is true in the child.
+    """
+    if BILLING_ENABLED:
+        return {"key": None, "base_url": None, "model": None}
+    return {
+        "key": request.headers.get("X-LLM-Key"),
+        "base_url": request.headers.get("X-LLM-Base-URL"),
+        "model": request.headers.get("X-LLM-Model"),
+    }
+
+
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
     """Resolve the Upload-Post key and the profile to post as.
 
@@ -258,7 +275,7 @@ def gemini_missing_error():
     if BILLING_ENABLED:
         return payment_required(
             "no_plan", "This action needs an active OpenShorts plan (or the user's own API key).")
-    return HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+    return HTTPException(status_code=400, detail="Missing X-Gemini-Key header or LLM configuration (LLM_BASE_URL / X-LLM-Base-URL)")
 
 
 # Probe rate limiter. In-memory, resets on restart by design — the hard monthly
@@ -3058,11 +3075,15 @@ async def process_endpoint(
     max_minutes: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
-    if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
-        # Self-host with an OpenAI-compatible server configured needs no
-        # Google key for the core pipeline: the moment picker runs there and
-        # the frame-based stages degrade on their own (layout_picker returns
-        # "none", silent videos fail with a message that says why).
+    llm_hdrs = _llm_headers(request)
+    has_llm = (llm_backend.active() or bool(llm_hdrs.get("base_url"))) and not BILLING_ENABLED
+    if not api_key and not has_llm:
+        # Self-host with an OpenAI-compatible server configured (env or BYOK
+        # header) needs no Google key for the core pipeline: the moment picker
+        # and the frame-based vision stages run on the LLM server, and the
+        # Gemini-only stages (editor effects, silent videos) degrade on their
+        # own (layout_picker returns "none", silent videos fail with a message
+        # that says why).
         raise gemini_missing_error()
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
@@ -3178,6 +3199,15 @@ async def process_endpoint(
         env["GEMINI_API_KEY"] = api_key # Override with key from request
     else:
         env.pop("GEMINI_API_KEY", None)  # local-LLM job: main.py must not find a stale key
+    # BYOK LLM config from request headers overrides server-level LLM_* env.
+    # child_env() already passes through server-level LLM_* vars (not in the
+    # denylist); these per-job values win when the user brought their own key.
+    if llm_hdrs.get("base_url"):
+        env["LLM_BASE_URL"] = llm_hdrs["base_url"]
+    if llm_hdrs.get("key"):
+        env["LLM_API_KEY"] = llm_hdrs["key"]
+    if llm_hdrs.get("model"):
+        env["LLM_MODEL"] = llm_hdrs["model"]
     # The stdio fix above only covers this process. main.py prints an emoji on
     # its first line and configures nothing, so on a cp1252 console the child
     # still dies before it renders anything -- the server starts and every job

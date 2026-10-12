@@ -40,3 +40,23 @@ def test_disabled_or_keyless_check_never_calls_out(monkeypatch):
     monkeypatch.setattr(burned_subtitles, "ENABLED", True)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     assert burned_subtitles.detect("v.mp4") is None
+
+
+def test_llm_backend_routes_without_gemini_key(monkeypatch):
+    """When llm_backend is active, detect() uses it instead of the Gemini SDK."""
+    monkeypatch.setattr(burned_subtitles, "ENABLED", True)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.test/v1")
+
+    called = {}
+    def fake_vision(contents, schema, model=None):
+        called["schema"] = schema.__name__
+        return {"frames": [{"frame": 0, "subtitle_top": 0.85},
+                           {"frame": 1, "subtitle_top": 0.85},
+                           {"frame": 2, "subtitle_top": 0.85}]}, {}
+    monkeypatch.setattr(burned_subtitles.llm_backend, "generate_json_vision", fake_vision)
+
+    # Pass frames directly so detect() never needs cv2/layout_picker.
+    band = burned_subtitles.detect("v.mp4", frames=[b"\xff\xd8jpg"] * 3)
+    assert band is not None
+    assert called["schema"] == "SubtitleAnswer"

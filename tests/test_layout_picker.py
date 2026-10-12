@@ -98,6 +98,23 @@ class TestPick:
         monkeypatch.setitem(sys.modules, "google.genai", None)
         assert pick("video.mp4", 60) == "none"
 
+    def test_llm_backend_routes_without_gemini_key(self, monkeypatch):
+        """When llm_backend is active, pick() uses it instead of the Gemini SDK."""
+        monkeypatch.setattr(layout_picker, "ENABLED", True)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("LLM_BASE_URL", "http://llm.test/v1")
+        monkeypatch.setattr(layout_picker, "sample_frames",
+                            lambda vp: [b"\xff\xd8jpg"] * 3)
+
+        called = {}
+        def fake_vision(contents, schema, model=None):
+            called["contents"] = contents
+            return {"layout": "screencast", "why": "screen", "confidence": 0.9}, {}
+        monkeypatch.setattr(layout_picker.llm_backend, "generate_json_vision", fake_vision)
+
+        assert pick("video.mp4", 60) == "screencast"
+        assert len(called["contents"]) == 4  # 3 frames + prompt
+
 
 class TestValidDecisions:
     def test_every_valid_decision_maps_to_known_modules(self):

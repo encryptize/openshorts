@@ -43,6 +43,9 @@ _ENV_HEADERS = {
         if os.environ.get("OPENSHORTS_API_KEY") else None
     ),
     "x-gemini-key": lambda: os.environ.get("GEMINI_API_KEY"),
+    "x-llm-key": lambda: os.environ.get("LLM_API_KEY"),
+    "x-llm-base-url": lambda: os.environ.get("LLM_BASE_URL"),
+    "x-llm-model": lambda: os.environ.get("LLM_MODEL"),
     "x-upload-post-key": lambda: os.environ.get("UPLOAD_POST_API_KEY"),
 }
 

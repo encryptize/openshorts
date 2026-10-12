@@ -1,28 +1,18 @@
-"""Text-only LLM backend for the moment picker: any OpenAI-compatible server.
+"""OpenAI-compatible LLM backend: any ``/chat/completions`` server.
 
-Ollama, LM Studio, vLLM, llama.cpp's server, LocalAI and OpenRouter all speak
-``POST {base}/chat/completions``. When ``LLM_BASE_URL`` is set (or
-``LLM_PROVIDER=openai``), the transcript scoring and detail passes in
-``main.get_viral_clips`` go here instead of Gemini, so a self-hosted install
-can run the whole pipeline without a Google key.
+Text generation (moment picker score + detail passes) and vision generation
+(layout picker, hook grounding, burned-subtitle detection, screencast detection)
+both route through here when ``LLM_BASE_URL`` is set — the caller never branches
+on the provider.  Supports Ollama, LM Studio, vLLM, llama.cpp, LocalAI,
+OpenRouter, and any other OpenAI-compatible endpoint.
 
-What stays on Gemini, because it needs a model that can look at frames or a
-video file: the layout picker (``layout_picker.py``), the on-screen content
-detector (``screencast_layout.py``) and the silent-video path
-(``main.get_visual_clips``). Without a Gemini key those degrade the way they
-already did: the first two return "none", the third fails the job with a clear
-message. Nothing in this module is imported by them.
-
-Structured output: the prompts already spell out the exact JSON shape, so a
-plain ``json_object`` mode is enough for most models. The request first asks
-for ``json_schema`` (Ollama, vLLM, llama.cpp and LM Studio enforce it); a
-server that rejects that field gets the same request again with
-``json_object``, then with no ``response_format`` at all. Whatever comes back
-is validated with the same pydantic model Gemini's ``response_schema`` uses,
-so ``main.py`` sees one shape regardless of provider.
+The Google Gen AI SDK remains the path for stages that need the Files API
+(editor AI effects, silent-video clipping) or image generation (thumbnails);
+those degrade gracefully when no Gemini key is present.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 from typing import Optional, Tuple, Type
@@ -50,6 +40,11 @@ def base_url() -> str:
 
 def model_name() -> str:
     return (os.environ.get("LLM_MODEL") or "").strip() or DEFAULT_MODEL
+
+
+def vision_model_name() -> str:
+    """Model for image-frame vision stages; falls back to the text model."""
+    return (os.environ.get("LLM_VISION_MODEL") or "").strip() or model_name()
 
 
 def active() -> bool:
@@ -148,6 +143,78 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
     # Validate against the same schema Gemini enforces server-side, so a
     # local model that drops a field fails here with a readable error
     # (retried by the caller) instead of deep inside the clip pipeline.
+    validated = schema.model_validate(parsed).model_dump()
+
+    usage = data.get("usage") or {}
+    cost = {
+        "input_tokens": int(usage.get("prompt_tokens") or 0),
+        "output_tokens": int(usage.get("completion_tokens") or 0),
+        "thinking_tokens": 0,
+        "input_cost": 0.0,
+        "output_cost": 0.0,
+        "total_cost": 0.0,
+        "model": model,
+        "price_estimated": False,
+        "local": True,
+    }
+    return validated, cost
+
+
+def generate_json_vision(contents: list, schema: Type[BaseModel],
+                         model: Optional[str] = None,
+                         ) -> Tuple[dict, Optional[dict]]:
+    """One vision chat completion: images + text → JSON matching ``schema``.
+
+    ``contents`` is a mixed list of ``str`` (text) and ``bytes`` (JPEG image),
+    matching the Gemini ``parts + [prompt]`` pattern callers already build.
+    Returns ``(parsed_dict, cost_analysis)`` in the same shape as
+    ``generate_json``. Raises on HTTP errors, empty bodies and schema
+    violations; the retry policy lives in the caller.
+    """
+    import gemini_worker  # local import: keeps this module free of the google SDK
+
+    url = f"{base_url()}/chat/completions"
+    model = model or vision_model_name()
+    # Build OpenAI content parts: str → text, bytes → base64 image_url.
+    parts = []
+    for item in contents:
+        if isinstance(item, (bytes, bytearray)):
+            b64 = base64.b64encode(item).decode()
+            parts.append({"type": "image_url",
+                          "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        else:
+            parts.append({"type": "text", "text": str(item)})
+    messages = [
+        {"role": "system", "content": "You answer with a single JSON object and nothing else."},
+        {"role": "user", "content": parts},
+    ]
+    last_rejection: Optional[str] = None
+    with _client() as client:
+        for fmt in _response_formats(schema):
+            body = {"model": model, "messages": messages, "temperature": 0.2, "stream": False}
+            if fmt is not None:
+                body["response_format"] = fmt
+            resp = client.post(url, json=body, headers=_headers())
+            if fmt is not None and _is_format_rejection(resp):
+                last_rejection = resp.text[:200]
+                continue
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"LLM server {resp.status_code} from {url}: {resp.text[:300]}")
+            data = resp.json()
+            break
+        else:
+            raise RuntimeError(
+                f"LLM server rejected every response_format variant: {last_rejection}")
+
+    choices = data.get("choices") or []
+    text = ""
+    if choices:
+        msg = choices[0].get("message") or {}
+        text = msg.get("content") or ""
+        if isinstance(text, list):
+            text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
+    parsed = gemini_worker._parse_json_response_text(text)
     validated = schema.model_validate(parsed).model_dump()
 
     usage = data.get("usage") or {}

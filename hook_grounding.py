@@ -14,15 +14,19 @@ and title are rewritten to name what is shown. Same principle as the layout
 picker: a few frames at a legible resolution answering one concrete
 question. About 3k tokens per clip.
 
-Frames need a model that can see, so this is Gemini-only: with just a local
-LLM (``LLM_BASE_URL``) the function returns None and the transcript-based
-hook stands. Never raises: a hook problem must never cost the clip.
+Frames need a model that can see. With an OpenAI-compatible vision endpoint
+(``LLM_BASE_URL`` set, e.g. OpenRouter) the call routes there; otherwise
+Gemini is used. With neither, the function returns None and the
+transcript-based hook stands. Never raises: a hook problem must never cost
+the clip.
 """
 from __future__ import annotations
 
 import json
 import os
 from typing import Optional
+
+import llm_backend
 
 SCREEN_LAYOUTS = {"screencast", "wide", "inset"}
 FRAMES = int(os.environ.get("HOOK_GROUNDING_FRAMES", "3"))
@@ -121,11 +125,18 @@ def frames_at(video_path, times, width=None):
     return out
 
 
-def _ask_gemini(frames, prompt, api_key):
+def _ask_gemini(frames, prompt, api_key=None):
     """One vision call; returns the parsed dict. Split out so tests can stub it."""
+    import gemini_worker
+
+    if llm_backend.active():
+        # OpenAI-compatible vision endpoint (OpenRouter, Ollama, vLLM, …).
+        parsed, _ = llm_backend.generate_json_vision(
+            frames + [prompt], gemini_worker.GroundedHook)
+        return parsed
+
     from google import genai
     from google.genai import types as genai_types
-    import gemini_worker
 
     client = genai.Client(api_key=api_key)
     model_name = os.environ.get("GEMINI_MODEL") or "gemini-3.1-flash-lite"
@@ -145,11 +156,14 @@ def reground(clip_path, clip, transcript, start, end) -> Optional[dict]:
     """Rewrite ``clip['viral_hook_text']`` / ``video_title_for_youtube_short``
     in place from the clip's frames. Returns what changed (also stored under
     ``clip['hook_grounding']``), or None when skipped or failed."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("   🪝 Hook grounding skipped: needs a Gemini key (frames), "
-              "keeping the transcript hook.")
-        return None
+    if llm_backend.active():
+        api_key = None
+    else:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            print("   🪝 Hook grounding skipped: needs a Gemini key (frames), "
+                  "keeping the transcript hook.")
+            return None
     try:
         import gemini_worker
 
