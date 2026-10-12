@@ -43,6 +43,7 @@ WORKDIR /app
 # (issue #89). libass shapes and orders RTL text itself once a font has the glyphs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    gosu \
     curl \
     libgl1 \
     libglib2.0-0 \
@@ -109,6 +110,16 @@ USER appuser
 
 # Pre-download YOLO model on build (now running as appuser)
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+
+# The final image starts as root; docker-entrypoint.sh fixes bind-mount ownership
+# (chown writable dirs) then drops to appuser via gosu before exec-ing the CMD.
+USER root
+
+# Ensure the entrypoint script is executable in the image (the bind-mounted copy
+# from the host may have different perms). ENTRYPOINT uses sh so it works even
+# without the execute bit on the bind-mounted copy.
+RUN chmod +x /app/docker-entrypoint.sh
+ENTRYPOINT ["sh", "/app/docker-entrypoint.sh"]
 
 # Expose FastAPI port
 EXPOSE 8000

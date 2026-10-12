@@ -30,5 +30,9 @@ RUN cd /app/remotion && npm install
 # Build TypeScript
 RUN npm run build
 
+# Make /app writable by the node user (UID 1000) so webpack's persistent cache
+# and Chromium can write when the container runs as a non-root user.
+RUN chown -R node:node /app
+
 EXPOSE 3100
 CMD ["node", "dist/server.js"]
