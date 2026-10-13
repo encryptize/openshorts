@@ -12,20 +12,22 @@ const DEFAULT_Y = 0.05;
 /**
  * Drag-and-drop watermark overlay editor.
  *
- * The user picks a logo (from saved presets), drags it to position over a 9:16
- * video preview, adjusts width/opacity, then applies or saves a preset. Apply
- * and remove are delegated to ResultCard handlers that POST to the server and
- * update the clip's video_url.
+ * The user picks a logo — either an uploaded PNG (from Settings) or a saved
+ * preset (logo + position/size) — drags it to position over a 9:16 preview,
+ * adjusts width/opacity, then applies or saves a preset. Apply and remove are
+ * delegated to ResultCard handlers that POST to the server and update the
+ * clip's video_url.
  *
  * Props:
  *  - isOpen / onClose
- *  - jobId, index, serverVideoFile, currentVideoUrl
+ *  - serverVideoFile, currentVideoUrl
+ *  - uploads: [{ filename, url }] uploaded PNG logos (server-side)
  *  - onApply({ logo_filename, x_ratio, y_ratio, width_ratio, opacity })
  *  - onRemove()
  *  - isProcessing (bool)
  */
 export default function UserWatermarkModal({
-    isOpen, onClose, serverVideoFile, currentVideoUrl, onApply, onRemove, isProcessing = false,
+    isOpen, onClose, serverVideoFile, currentVideoUrl, uploads = [], onApply, onRemove, isProcessing = false,
 }) {
     const [presets, setPresets] = useState(() => getWatermarkPresets());
     const [selectedPresetId, setSelectedPresetId] = useState('');
@@ -100,6 +102,16 @@ export default function UserWatermarkModal({
         setOpacity(p.opacity);
     };
 
+    const selectLogo = (u) => {
+        setSelectedPresetId('');
+        setLogoFilename(u.filename);
+        setLogoUrl(u.url);
+        setXRatio(DEFAULT_X);
+        setYRatio(DEFAULT_Y);
+        setWidthRatio(DEFAULT_WIDTH);
+        setOpacity(DEFAULT_OPACITY);
+    };
+
     const handleSavePreset = () => {
         const name = presetName.trim();
         if (!name || !logoFilename) return;
@@ -168,6 +180,37 @@ export default function UserWatermarkModal({
                     </div>
                 </div>
 
+                {/* Uploaded logos — the source for a new overlay. Without this
+                    pick there is no way to load a logo, so apply and save-preset
+                    are both dead ends (the preset selector only loads existing
+                    presets). */}
+                <div>
+                    <label className="block text-sm text-muted mb-1.5">Logo</label>
+                    {uploads.length > 0 ? (
+                        <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
+                            {uploads.map((u) => (
+                                <button
+                                    key={u.filename}
+                                    type="button"
+                                    onClick={() => selectLogo(u)}
+                                    className={`flex items-center justify-center p-1.5 rounded-input border transition-colors ${
+                                        logoFilename === u.filename
+                                            ? 'border-brass bg-paper3'
+                                            : 'border-rule hover:bg-paper3'
+                                    }`}
+                                    title={u.filename}
+                                >
+                                    <img src={u.url} alt={u.filename} className="max-h-10 object-contain" />
+                                </button>
+                            ))}
+                        </div>
+                    ) : (
+                        <p className="text-xs text-muted">
+                            No logos uploaded yet — add one in Settings.
+                        </p>
+                    )}
+                </div>
+
                 {/* Preset selector */}
                 <div>
                     <label className="block text-sm text-muted mb-1.5">Preset</label>
@@ -216,7 +259,7 @@ export default function UserWatermarkModal({
                 <p className="text-xs text-muted">
                     {logoUrl
                         ? 'drag the logo to position it'
-                        : 'select a preset to load a logo'}
+                        : 'pick a logo or a preset to start'}
                 </p>
 
                 {/* Save as preset */}

@@ -7117,6 +7117,23 @@ async def watermark_upload(request: Request, file: UploadFile = File(...)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+@app.get("/api/watermark/uploads")
+async def list_watermark_uploads(request: Request):
+    """List the user-uploaded PNG watermark logos (stored under /videos).
+
+    The upload endpoint only hands back the one file it just wrote, so without
+    this the Settings card (and the clip watermark modal) lose the logo list on
+    a reload and there is nothing to pick from. No entitlement gate: the logos
+    are inert images and the apply endpoint already gates the real work.
+    """
+    upload_dir = os.path.join(OUTPUT_DIR, "watermark_uploads")
+    uploads = []
+    if os.path.isdir(upload_dir):
+        for name in sorted(os.listdir(upload_dir)):
+            if name.lower().endswith(".png"):
+                uploads.append({"filename": name,
+                                "url": f"/videos/watermark_uploads/{name}"})
+    return {"uploads": uploads}
 
 
 @app.post("/api/saasshorts/actor-options")

@@ -393,6 +393,13 @@ function App() {
   const [watermarkUploading, setWatermarkUploading] = useState(false);
   const fileInputRef = useRef(null);
 
+  const fetchWatermarkUploads = async () => {
+    try {
+      const data = await apiJson('/api/watermark/uploads');
+      setWatermarkUploads((data.uploads || []).map((u) => ({ filename: u.filename, url: getApiUrl(u.url) })));
+    } catch (_) { /* inert: leave the list as-is */ }
+  };
+
   const handleWatermarkUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -407,8 +414,7 @@ function App() {
       fd.append('file', file);
       const res = await apiFetch('/api/watermark/upload', { method: 'POST', body: fd });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setWatermarkUploads((prev) => [...prev, { filename: data.filename, url: getApiUrl(data.url) }]);
+      await fetchWatermarkUploads();
     } catch (err) {
       alert('Upload failed: ' + err.message);
     } finally {
@@ -421,11 +427,19 @@ function App() {
     setWatermarkPresets(removeWatermarkPreset(id));
   };
 
-  // Refresh presets from localStorage when Settings is opened (presets may
-  // have been added from the ResultCard watermark modal on another tab).
+  // Refresh presets from localStorage and the uploaded-logo list from the
+  // server when Settings is opened (presets may have been added from the
+  // ResultCard watermark modal on another tab; uploads may have changed).
   useEffect(() => {
-    if (activeTab === 'settings') setWatermarkPresets(getWatermarkPresets());
+    if (activeTab === 'settings') {
+      setWatermarkPresets(getWatermarkPresets());
+      fetchWatermarkUploads();
+    }
   }, [activeTab]);
+
+  // Load uploaded logos once on mount so the clip watermark modal has
+  // something to pick from without a Settings visit first.
+  useEffect(() => { fetchWatermarkUploads(); }, []);
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -2425,7 +2439,7 @@ function App() {
                           uploadPostKey={uploadPostKey}
                           uploadUserId={uploadUserId}
                           geminiApiKey={apiKey}
-                          elevenLabsKey={elevenLabsKey}
+                          watermarkUploads={watermarkUploads}
                           isManaged={isManaged}
                           connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}
                           onConnectSocials={isManaged ? handleConnectSocials : null}
