@@ -125,12 +125,14 @@ for _stream in (sys.stdout, sys.stderr):
 # self-hosted BYOK app does today (no extra dependencies required).
 BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true", "yes")
 
-# Job/file retention (issue #46). Self-host defaults to 24h: the 1h sweep kept
-# deleting finished projects under users who never touched their env, and the
-# OUTPUT_MAX_GB / UPLOADS_MAX_GB caps below already bound the disk. Cloud keeps
-# the tight default because clips are archived to R2 as soon as a job finishes.
+# Job/file retention (issue #46). Self-host defaults to 0 (indefinite — clips
+# persist on disk until the OUTPUT_MAX_GB / UPLOADS_MAX_GB size caps evict the
+# oldest); 0 disables the time-based sweeps below (_sweep_expired_job_dirs,
+# _sweep_expired_uploads, the saas_jobs in-memory cleanup), which check <= 0
+# and return immediately. Cloud keeps the tight 1h default because clips are
+# archived to R2 as soon as a job finishes.
 JOB_RETENTION_SECONDS = int(
-    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "86400")
+    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "0")
 )
 # The retained download of a URL job (--keep-original) is the one artifact that
 # is a full copy of someone else's video rather than something we made, so it
@@ -1581,7 +1583,13 @@ def _upload_job_id(filename: str) -> str:
 
 
 def _sweep_expired_job_dirs(now):
-    """Drop job dirs older than JOB_RETENTION_SECONDS, except live jobs."""
+    """Drop job dirs older than JOB_RETENTION_SECONDS, except live jobs.
+
+    A no-op when JOB_RETENTION_SECONDS <= 0 (indefinite retention): the
+    size cap (_enforce_output_size_cap) is the only eviction mechanism.
+    """
+    if JOB_RETENTION_SECONDS <= 0:
+        return
     for job_id in os.listdir(OUTPUT_DIR):
         # Not a job: the thumbnails dir backs a StaticFiles mount, so
         # deleting it would 500 every /thumbnails request until reboot.
@@ -1603,7 +1611,12 @@ def _sweep_expired_job_dirs(now):
 
 def _sweep_expired_uploads(now):
     """Drop source uploads older than JOB_RETENTION_SECONDS, except the source
-    of a job that is still queued or running."""
+    of a job that is still queued or running.
+
+    A no-op when JOB_RETENTION_SECONDS <= 0 (indefinite retention).
+    """
+    if JOB_RETENTION_SECONDS <= 0:
+        return
     for filename in os.listdir(UPLOAD_DIR):
         file_path = os.path.join(UPLOAD_DIR, filename)
         try:
@@ -1739,6 +1752,7 @@ async def cleanup_jobs():
                     if jdata.get("status") in ("completed", "failed")
                     and jdata.get("output_dir")
                     and os.path.isdir(jdata["output_dir"])
+                    and JOB_RETENTION_SECONDS > 0
                     and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
                 ]
                 for jid in saas_expired:

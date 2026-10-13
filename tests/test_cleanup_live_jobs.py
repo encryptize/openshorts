@@ -149,3 +149,26 @@ class TestSettleWithoutEntry:
         job = {"status": "processing", "reservation_id": "res-1"}
         asyncio.run(app_module._settle_reservation("gone", job))
         assert calls == [("release", "res-1")]
+
+
+class TestIndefiniteRetention:
+    """JOB_RETENTION_SECONDS = 0 means indefinite retention: the time-based
+    sweeps become no-ops, so even old finished jobs and their uploads survive
+    on disk (the OUTPUT_MAX_GB size cap is the only eviction left)."""
+
+    def test_old_finished_job_survives_when_retention_is_zero(self, disk, monkeypatch):
+        out, up = disk
+        monkeypatch.setattr(app_module, "JOB_RETENTION_SECONDS", 0)
+        d = _job_dir(out, "done", age=2 * 3600)
+        app_module.jobs["done"] = {"status": "completed"}
+        app_module._sweep_expired_job_dirs(time.time())
+        assert d.exists()
+        assert "done" in app_module.jobs
+
+    def test_old_source_upload_survives_when_retention_is_zero(self, disk, monkeypatch):
+        _, up = disk
+        monkeypatch.setattr(app_module, "JOB_RETENTION_SECONDS", 0)
+        f = _upload(up, "done", age=2 * 3600)
+        app_module.jobs["done"] = {"status": "failed"}
+        app_module._sweep_expired_uploads(time.time())
+        assert f.exists()
