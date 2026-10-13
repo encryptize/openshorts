@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Loader2, Download, Film, FolderOpen } from 'lucide-react';
 import { apiJson } from '../lib/api';
+import { getApiUrl } from '../config';
 
 // The signed-in user's saved video library (stored in R2). Private, signed links.
 // Videos are grouped by project (job); re-openable projects get a "reopen"
@@ -103,13 +104,13 @@ export default function HistoryTab({ onReopenProject }) {
                 {vids.map((v) => (
                   <div key={v.id} className="card card-hover overflow-hidden group">
                     <div className="aspect-[9/16] bg-black">
-                      <video src={v.view_url} controls preload="metadata" className="w-full h-full object-contain" />
+                      <video src={getApiUrl(v.view_url)} controls preload="metadata" className="w-full h-full object-contain" />
                     </div>
                     <div className="p-3">
                       <p className="text-sm text-ink font-medium line-clamp-2 mb-1" title={v.title}>{v.title || 'Short'}</p>
                       <div className="flex items-center justify-between">
                         <span className="readout">{fmtDate(v.created_at)}</span>
-                        <a href={v.download_url} className="text-micro font-mono uppercase text-brass hover:text-ink flex items-center gap-1 transition-colors" title="Download">
+                        <a href={getApiUrl(v.download_url)} className="text-micro font-mono uppercase text-brass hover:text-ink flex items-center gap-1 transition-colors" title="Download">
                           <Download size={14} /> Download
                         </a>
                       </div>

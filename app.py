@@ -8,6 +8,7 @@ import threading
 import json
 import shutil
 import glob
+import base64
 import hashlib
 import hmac
 import time
@@ -125,6 +126,76 @@ for _stream in (sys.stdout, sys.stderr):
 # self-hosted BYOK app does today (no extra dependencies required).
 BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true", "yes")
 
+# ---- Self-hosted shared-password access control -------------------------------
+# Setting ACCESS_PASSWORD turns on a single shared login for the whole instance:
+# every device that knows the password shares one session and can see the
+# global clip library (History tab). Unset = open access (the classic BYOK app).
+# Cloud mode ignores this entirely (it has its own auth in cloud.auth).
+ACCESS_PASSWORD = os.environ.get("ACCESS_PASSWORD", "")
+
+
+def _self_host_jwt_secret() -> str:
+    """HS256 signing secret for self-host session tokens. JWT_SECRET (stable
+    across password changes) takes precedence; otherwise the secret is derived
+    from ACCESS_PASSWORD so changing the password invalidates all sessions."""
+    secret = os.environ.get("JWT_SECRET", "")
+    if secret:
+        return secret
+    return hashlib.sha256(("openshorts-selfhost:" + ACCESS_PASSWORD).encode()).hexdigest()
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def _issue_self_host_jwt(ttl_days: int = 365) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    now = int(time.time())
+    payload = {"sub": "selfhost", "iat": now, "exp": now + ttl_days * 86400}
+    segments = [
+        _b64url_encode(json.dumps(header, separators=(",", ":")).encode()),
+        _b64url_encode(json.dumps(payload, separators=(",", ":")).encode()),
+    ]
+    signing_input = ".".join(segments).encode("ascii")
+    sig = hmac.new(_self_host_jwt_secret().encode(), signing_input, hashlib.sha256).digest()
+    segments.append(_b64url_encode(sig))
+    return ".".join(segments)
+
+
+def _verify_self_host_jwt(token: str) -> bool:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return False
+        signing_input = (parts[0] + "." + parts[1]).encode("ascii")
+        expected = hmac.new(_self_host_jwt_secret().encode(), signing_input, hashlib.sha256).digest()
+        actual = _b64url_decode(parts[2])
+        if not hmac.compare_digest(expected, actual):
+            return False
+        payload = json.loads(_b64url_decode(parts[1]))
+        if payload.get("sub") != "selfhost":
+            return False
+        if int(payload.get("exp", 0)) < int(time.time()):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+class _SelfHostUser:
+    """Stand-in user object for self-host password auth. Satisfies the
+    attribute accesses in _owner_id / _assert_job_owner; managed_keys is never
+    called when BILLING is off."""
+    id = "selfhost"
+    email = None
+    entitled = True
+    plan = None
+
 # Job/file retention (issue #46). Self-host defaults to 0 (indefinite — clips
 # persist on disk until the OUTPUT_MAX_GB / UPLOADS_MAX_GB size caps evict the
 # oldest); 0 disables the time-based sweeps below (_sweep_expired_job_dirs,
@@ -160,7 +231,15 @@ else:
     _alerts = None
 
     async def get_current_user_optional(request: Request):
-        # No-op dependency in self-host mode: every request is anonymous / BYOK.
+        # Self-host: when ACCESS_PASSWORD is set, a valid Bearer JWT authenticates
+        # the shared session. Without ACCESS_PASSWORD every request is anonymous.
+        if not ACCESS_PASSWORD:
+            return None
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+            if _verify_self_host_jwt(token):
+                return _SelfHostUser()
         return None
 
 
@@ -396,7 +475,10 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
     on the operator's key for free. Only skip metering when billing is off.
     """
     if not BILLING_ENABLED:
-        return None, 2, None, None, None
+        owner = await _owner_id(request)
+        if ACCESS_PASSWORD and owner is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        return owner, 2, None, None, None
     user = await _user_from_request(request)
     if not managed_keys.has_active_entitlement(user):
         return None, 2, None, None, None  # shouldn't happen (resolve_gemini would have 402'd)
@@ -556,10 +638,13 @@ async def require_managed_entitlement(request):
 
 
 async def _owner_id(request):
-    """The authenticated cloud user's id to stamp on a new job/session, or None
-    for self-host / BYOK / anonymous (BILLING off → nothing to scope)."""
+    """The authenticated user's id to stamp on a new job/session, or None
+    for anonymous self-host / BYOK (no ACCESS_PASSWORD → nothing to scope)."""
     if not BILLING_ENABLED:
-        return None
+        if not ACCESS_PASSWORD:
+            return None
+        user = await _user_from_request(request)
+        return user.id if user else None
     user = await _user_from_request(request)
     return user.id if user else None
 
@@ -573,7 +658,7 @@ async def _assert_job_owner(request, record):
     a non-owner can't even confirm the id exists. UUID ids already make these
     stores hard to enumerate; this closes the gap for a shared/leaked id.
     """
-    if not BILLING_ENABLED:
+    if not BILLING_ENABLED and not ACCESS_PASSWORD:
         return
     owner = record.get("user_id") if isinstance(record, dict) else None
     if owner is None:
@@ -2478,6 +2563,78 @@ app.add_middleware(
     expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
 )
 
+# ---- Self-host endpoints: shared-password login + clip library ---------------
+# These exist only when BILLING is off. With ACCESS_PASSWORD set they require a
+# valid JWT; without it they are open (the classic BYOK app). Cloud mode has its
+# own /api/me, /api/history and /api/projects in cloud/auth.py + cloud/videos.py.
+if not BILLING_ENABLED:
+
+    class _PasswordLogin(BaseModel):
+        password: str
+
+    async def _self_host_user_or_401(request: Request):
+        """Return the authenticated self-host user, or raise 401 when a password
+        is configured and the caller has no valid token."""
+        if not ACCESS_PASSWORD:
+            return None
+        user = await get_current_user_optional(request)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        return user
+
+    @app.post("/api/auth/login")
+    async def self_host_login(payload: _PasswordLogin):
+        if not ACCESS_PASSWORD:
+            # No password configured: nothing to log in to. Mirror the open mode.
+            return {"token": _issue_self_host_jwt()}
+        if not hmac.compare_digest(payload.password.encode(), ACCESS_PASSWORD.encode()):
+            raise HTTPException(status_code=401, detail="Wrong password")
+        return {"token": _issue_self_host_jwt()}
+
+    @app.get("/api/me")
+    async def self_host_me(request: Request):
+        await _self_host_user_or_401(request)
+        return {"user": "selfhost", "entitled": True, "plan": None, "minutes": None}
+
+    @app.get("/api/history")
+    async def self_host_history(request: Request):
+        await _self_host_user_or_401(request)
+        items = []
+        for job_id, job in jobs.items():
+            if job.get("status") != "completed":
+                continue
+            result = job.get("result") or {}
+            clips = result.get("clips") or []
+            if not clips:
+                continue
+            output_dir = job.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
+            try:
+                ts = os.path.getmtime(output_dir)
+            except OSError:
+                meta = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+                ts = os.path.getmtime(meta[0]) if meta else time.time()
+            created_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            for i, clip in enumerate(clips):
+                video_url = clip.get("video_url") or ""
+                items.append({
+                    "id": f"{job_id}_{i}",
+                    "job_id": job_id,
+                    "clip_index": i,
+                    "title": (clip.get("video_title_for_youtube_short")
+                              or clip.get("viral_hook_text") or "Short"),
+                    "created_at": created_at,
+                    "filename": video_url.rsplit("/", 1)[-1],
+                    "view_url": video_url,
+                    "download_url": video_url,
+                })
+        items.sort(key=lambda v: v["created_at"], reverse=True)
+        return {"videos": items}
+
+    @app.get("/api/projects")
+    async def self_host_projects(request: Request):
+        await _self_host_user_or_401(request)
+        return {"projects": []}
+
 # Mount static files for serving videos. A miss under /videos/<job_id>/ first
 # tries to bring the job back from R2 (see restoring_static.py): the players
 # of a reopened project used to 404 while the transcript requests were still
@@ -2795,6 +2952,9 @@ async def get_config():
         "billingEnabled": BILLING_ENABLED,
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        # Self-host only: tells the dashboard whether a shared password is
+        # configured (shows the login modal + History tab).
+        "accessPasswordRequired": bool(ACCESS_PASSWORD),
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),

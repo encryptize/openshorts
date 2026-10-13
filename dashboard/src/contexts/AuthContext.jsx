@@ -21,8 +21,8 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [signingIn, setSigningIn] = useState(false);
 
-  const refreshMe = useCallback(async () => {
-    if (!getToken()) { setMe(null); return null; }
+  const refreshMe = useCallback(async (opts = {}) => {
+    if (!getToken() && !opts.force) { setMe(null); return null; }
     try {
       const data = await apiJson('/api/me');
       setMe(data);
@@ -112,6 +112,13 @@ export function AuthProvider({ children }) {
         if (cfg.billingEnabled) {
           const handled = await handleAuthHash();
           if (!handled) await refreshMe();
+        } else if (cfg.accessPasswordRequired) {
+          // Self-host with password: refreshMe uses the stored JWT (if any).
+          await refreshMe();
+        } else {
+          // Open self-host: /api/me returns the shared user without a token,
+          // so isSignedIn is true and the History tab is visible without login.
+          await refreshMe({ force: true });
         }
       } catch (_) { /* config fetch failed — stay in BYOK */ }
       setLoading(false);
@@ -133,6 +140,19 @@ export function AuthProvider({ children }) {
     window.location.href = getApiUrl('/api/auth/google');
   }, []);
 
+  const loginWithPassword = useCallback(async (password) => {
+    const res = await apiFetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    if (res.status === 401) throw new Error('Wrong password');
+    if (!res.ok) throw new Error('Could not sign in');
+    const data = await res.json();
+    setToken(data.token);
+    return await refreshMe();
+  }, [refreshMe]);
+
   const logout = useCallback(() => {
     clearToken();
     setMe(null);
@@ -141,6 +161,7 @@ export function AuthProvider({ children }) {
 
   const value = {
     billingEnabled: config.billingEnabled,
+    accessPasswordRequired: config.accessPasswordRequired || false,
     localLlm: config.localLlm || null,
     googleAuthEnabled: config.googleAuthEnabled,
     jobRetentionSeconds: config.jobRetentionSeconds || null,
@@ -157,6 +178,7 @@ export function AuthProvider({ children }) {
     refreshMe,
     requestMagicLink,
     loginWithGoogle,
+    loginWithPassword,
     logout,
   };
 

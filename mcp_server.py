@@ -450,9 +450,9 @@ async def _tool_list_clips(client, args):
 
 async def _tool_get_quota(client, args):
     resp = await client.get("/api/me")
-    # 401: anonymous. 404: self-host, where /api/me isn't even mounted (the
-    # cloud router only registers under BILLING_ENABLED). Neither is an error
-    # from the agent's point of view — there is simply no quota to report.
+    # 401: anonymous (cloud token missing/invalid). 404: cloud router not
+    # mounted. Self-host /api/me returns {"user":"selfhost",...} with no
+    # plan/minutes — treat that the same way: no quota to report.
     if resp.status_code in (401, 404):
         return {"self_host_or_anonymous": True,
                 "note": "No authenticated cloud user; if this is a self-hosted "
@@ -460,6 +460,9 @@ async def _tool_get_quota(client, args):
     if resp.status_code >= 400:
         return _api_error(resp), True
     data = resp.json()
+    if data.get("user") == "selfhost":
+        return {"self_host_or_anonymous": True,
+                "note": "Self-hosted instance: no minute quota."}, False
     out = {"plan": data.get("plan"), "entitled": data.get("entitled"),
            "minutes": data.get("minutes"),
            "upload_post_profile": data.get("upload_post_profile")}
