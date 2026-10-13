@@ -235,7 +235,7 @@ export default function UserWatermarkModal({
                         <input
                             type="range"
                             min={5}
-                            max={50}
+                            max={100}
                             value={Math.round(widthRatio * 100)}
                             onChange={(e) => setWidthRatio(Number(e.target.value) / 100)}
                             className="w-full"
