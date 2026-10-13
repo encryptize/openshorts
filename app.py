@@ -2649,7 +2649,55 @@ if not BILLING_ENABLED:
     @app.get("/api/projects")
     async def self_host_projects(request: Request):
         await _self_host_user_or_401(request)
-        return {"projects": []}
+        projects = []
+        for job_id, job in jobs.items():
+            if job.get("status") != "completed":
+                continue
+            result = job.get("result") or {}
+            clips = result.get("clips") or []
+            if not clips:
+                continue
+            output_dir = job.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
+            try:
+                ts = os.path.getmtime(output_dir)
+            except OSError:
+                meta = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+                ts = os.path.getmtime(meta[0]) if meta else time.time()
+            first = clips[0]
+            projects.append({
+                "job_id": job_id,
+                "title": (first.get("video_title_for_youtube_short")
+                          or first.get("viral_hook_text") or "Project"),
+                "clip_count": len(clips),
+                "created_at": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+            })
+        projects.sort(key=lambda p: p["created_at"], reverse=True)
+        return {"projects": projects}
+
+    @app.post("/api/projects/{job_id}/restore")
+    async def self_host_restore_project(job_id: str, request: Request):
+        await _self_host_user_or_401(request)
+        # Files are already on local disk (no R2). If the job fell out of the
+        # in-memory dict (server restart), _recover_jobs_from_disk rebuilt it at
+        # startup; try one more recovery in case the dir appeared after that.
+        if job_id not in jobs:
+            _recover_jobs_from_disk()
+        job = jobs.get(job_id)
+        if not job or job.get("status") != "completed":
+            raise HTTPException(status_code=404, detail="Project not found")
+        result = job.get("result") or {}
+        clips = result.get("clips") or []
+        if not clips:
+            raise HTTPException(status_code=404, detail="Project not found")
+        first = clips[0]
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "result": result,
+            "project_state": None,
+            "title": (first.get("video_title_for_youtube_short")
+                      or first.get("viral_hook_text") or "Project"),
+        }
 
 # Mount static files for serving videos. A miss under /videos/<job_id>/ first
 # tries to bring the job back from R2 (see restoring_static.py): the players

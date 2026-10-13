@@ -2,11 +2,13 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Loader2, Download, Film, FolderOpen } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { getApiUrl } from '../config';
+import { useAuth } from '../contexts/AuthContext';
 
 // The signed-in user's saved video library (stored in R2). Private, signed links.
 // Videos are grouped by project (job); re-openable projects get a "reopen"
 // action that restores the whole job for further editing in the Clip Generator.
 export default function HistoryTab({ onReopenProject }) {
+  const { billingEnabled } = useAuth();
   const [videos, setVideos] = useState(null);
   const [projects, setProjects] = useState({});
   const [reopening, setReopening] = useState(null);
@@ -60,7 +62,9 @@ export default function HistoryTab({ onReopenProject }) {
       <p className="eyebrow mb-1.5">07 · HISTORY</p>
       <h1 className="font-display lowercase text-2xl text-ink mb-2">Your library</h1>
       <p className="text-muted text-sm mb-8 lowercase">
-        All the shorts you've generated, saved while your plan is active. Kept for 7 days after your plan ends. Reopen a project to keep editing its clips.
+        {billingEnabled
+          ? "All the shorts you've generated, saved while your plan is active. Kept for 7 days after your plan ends. Reopen a project to keep editing its clips."
+          : "All the shorts you've generated, saved on this server. Reopen a project to keep editing its clips."}
       </p>
 
       {error && <p className="text-danger text-sm">{error}</p>}

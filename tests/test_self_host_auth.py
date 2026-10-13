@@ -120,6 +120,12 @@ class TestProtectedWithoutToken:
     def test_me_401(self, with_password):
         assert _get("/api/me").status_code == 401
 
+    def test_projects_401(self, with_password):
+        assert _get("/api/projects").status_code == 401
+
+    def test_restore_401(self, with_password):
+        assert _post_json("/api/projects/x/restore", {}).status_code == 401
+
     def test_process_401(self, with_password, dirs, monkeypatch):
         # Set up a thumbnail session so /api/process gets past the source
         # check and reaches reserve_process_minutes (which raises 401).
@@ -157,11 +163,16 @@ class TestProtectedWithToken:
         assert body["user"] == "selfhost"
         assert body["entitled"] is True
 
-    def test_projects_empty(self, with_password):
+    def test_projects_lists_completed(self, with_password, dirs):
         token = _login("test123").json()["token"]
+        _fake_completed_job()
         resp = _get("/api/projects", token=token)
         assert resp.status_code == 200
-        assert resp.json() == {"projects": []}
+        projs = resp.json()["projects"]
+        assert len(projs) == 1
+        assert projs[0]["job_id"] == "job-fake-1"
+        assert projs[0]["clip_count"] == 2
+        assert projs[0]["title"] == "Viral Title"
 
     def test_history_excludes_non_completed(self, with_password, dirs):
         token = _login("test123").json()["token"]
@@ -173,6 +184,35 @@ class TestProtectedWithToken:
         resp = _get("/api/history", token=token)
         vids = resp.json()["videos"]
         assert all(v["job_id"] == "done" for v in vids)
+
+
+# ---- 3b. project restore ----------------------------------------------------
+
+class TestProjectRestore:
+    def test_restore_404_unknown(self, with_password):
+        token = _login("test123").json()["token"]
+        resp = _post_json("/api/projects/no-such-job/restore", {}, token=token)
+        assert resp.status_code == 404
+
+    def test_restore_ok(self, with_password, dirs):
+        token = _login("test123").json()["token"]
+        _fake_completed_job()
+        resp = _post_json("/api/projects/job-fake-1/restore", {}, token=token)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["job_id"] == "job-fake-1"
+        assert body["status"] == "completed"
+        assert body["title"] == "Viral Title"
+        assert body["project_state"] is None
+        clips = body["result"]["clips"]
+        assert len(clips) == 2
+        assert clips[0]["video_url"].startswith("/videos/")
+
+    def test_restore_no_auth_open_mode(self, monkeypatch, dirs):
+        monkeypatch.setattr(app_module, "ACCESS_PASSWORD", "")
+        _fake_completed_job()
+        resp = _post_json("/api/projects/job-fake-1/restore", {})
+        assert resp.status_code == 200
 
 
 # ---- 4. open mode (no ACCESS_PASSWORD) ---------------------------------------
