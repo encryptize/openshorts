@@ -1489,6 +1489,62 @@ def apply_watermark(video_path, output_path=None):
         os.remove(tmp_path)
     return False
 
+def apply_user_watermark(video_path, logo_path, x_ratio, y_ratio, width_ratio,
+                         opacity, output_path=None):
+    """Burn a user-supplied PNG logo onto a clip at an arbitrary position.
+
+    Unlike ``apply_watermark`` (the fixed free-plan lockup), the position and
+    size are caller-controlled via ratios of the clip dimensions, so the UI can
+    drag-and-drop the logo anywhere. Fail-open: returns ``False`` on probe or
+    encode failure, leaving the source untouched (same contract as
+    ``apply_watermark``).
+    """
+    if not os.path.exists(logo_path):
+        print(f"   ⚠️ User watermark logo missing ({logo_path}); clip left as-is.")
+        return False
+
+    try:
+        probe = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", video_path],
+            stderr=subprocess.STDOUT, timeout=60,
+        ).decode().strip().split("x")
+        vw, vh = int(probe[0]), int(probe[1])
+    except Exception as e:
+        print(f"   ⚠️ Could not probe clip for user watermark ({e}); clip left as-is.")
+        return False
+
+    # Clamp ratios server-side so a bad client payload can't push the logo
+    # off-frame or blow it up beyond the clip width.
+    x_ratio = min(1.0, max(0.0, float(x_ratio)))
+    y_ratio = min(1.0, max(0.0, float(y_ratio)))
+    width_ratio = min(1.0, max(0.01, float(width_ratio)))
+    opacity = min(1.0, max(0.0, float(opacity)))
+
+    wm_w = max(1, int(vw * width_ratio))
+    x = int(vw * x_ratio)
+    y = int(vh * y_ratio)
+    filt = (
+        f"[1:v]scale={wm_w}:-1,format=rgba,"
+        f"colorchannelmixer=aa={opacity}[wm];"
+        f"[0:v][wm]overlay=x={x}:y={y}"
+    )
+    tmp_path = (output_path or video_path) + ".wm.mp4"
+    cmd = ["ffmpeg", "-y", "-i", video_path, "-i", logo_path,
+           "-filter_complex", filt,
+           *video_encode_args(QUALITY), "-c:a", "copy", *METADATA_SCRUB,
+           "-movflags", "+faststart", tmp_path]
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            timeout=1800)
+    if result.returncode == 0 and os.path.exists(tmp_path):
+        os.replace(tmp_path, output_path or video_path)
+        return True
+    err = (result.stderr or b"").decode(errors="ignore")[-300:]
+    print(f"   ⚠️ User watermark pass failed (clip left as-is): {err}")
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+    return False
+
 
 def mark_delivery(final_path, marker=None):
     """The free-plan copy of a finished clip to serve: ``wm_<final>`` next to it.

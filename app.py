@@ -807,6 +807,7 @@ def _canonical_clip_file(output_dir, base_name, index):
                    + glob.glob(os.path.join(output_dir, f"recut_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hooked_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"hook_{clean}"))
+                   + glob.glob(os.path.join(output_dir, f"wmark_*_{clean}"))
                    + glob.glob(os.path.join(output_dir, f"wm_*{clean}")))
     except Exception:
         derived = []
@@ -898,6 +899,21 @@ def _strip_burned_hook(output_dir, filename):
     filename = _strip_watermark_copy(output_dir, filename)
     while True:
         m = re.match(r'^(?:hooked_\d+_|hook_)(.+)$', filename)
+        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
+            return filename
+        filename = m.group(1)
+
+def _strip_user_watermark(output_dir, filename):
+    """Walk ``wmark_<ts>_`` prefixes back to the file without a user watermark.
+
+    Distinct from the free-plan ``wm_`` prefix (``_strip_watermark_copy``):
+    ``wmark_`` is the user-overlay derivation, ``wm_`` is the free-plan marked
+    copy. Both are stripped so re-apply replaces the previous watermark instead
+    of stacking. Same fail-safe contract: unchanged when there is nothing to
+    strip or the underlying file is gone."""
+    filename = _strip_watermark_copy(output_dir, filename)
+    while True:
+        m = re.match(r'^wmark_\d+_(.+)$', filename)
         if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
             return filename
         filename = m.group(1)
@@ -5455,6 +5471,160 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
     _archive_clip_edit_bg(req.job_id, req.clip_index, filename)
     return {"success": True, "new_video_url": new_url}
 
+class WatermarkApplyRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    input_filename: Optional[str] = None
+    logo_filename: str
+    x_ratio: float
+    y_ratio: float
+    width_ratio: float
+    opacity: float
+
+
+class WatermarkRemoveRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    input_filename: Optional[str] = None
+
+
+@app.post("/api/watermark/apply")
+async def apply_user_watermark_endpoint(req: WatermarkApplyRequest, request: Request):
+    """Burn a user-supplied PNG logo onto a clip at a chosen position.
+
+    Single FFmpeg pass, same pattern as /api/subtitle. No metering: the cost
+    is nil (one short re-encode) and the endpoint is already gated by
+    require_managed_entitlement. Re-applying strips the previous ``wmark_``
+    derivation first so watermarks replace, never stack.
+    """
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+    clips = data.get('shorts', [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip_data = clips[req.clip_index]
+
+    # Resolve source filename.
+    if req.input_filename:
+        filename = os.path.basename(req.input_filename)
+    else:
+        filename = (clip_data.get('video_url') or '').split('/')[-1]
+        if not filename:
+            base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+            filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
+
+    # Strip previous user watermark (and free-plan wm_ copy) so re-apply replaces.
+    filename = _strip_user_watermark(output_dir, filename)
+
+    input_path = os.path.join(output_dir, filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+    # Resolve logo.
+    logo_path = os.path.join(OUTPUT_DIR, "watermark_uploads", req.logo_filename)
+    if not os.path.exists(logo_path):
+        raise HTTPException(status_code=404, detail="Watermark logo not found")
+
+    # Clamp ratios server-side.
+    x_ratio = min(1.0, max(0.0, float(req.x_ratio)))
+    y_ratio = min(1.0, max(0.0, float(req.y_ratio)))
+    width_ratio = min(1.0, max(0.01, float(req.width_ratio)))
+    opacity = min(1.0, max(0.0, float(req.opacity)))
+
+    generation_id = int(time.time())
+    output_filename = f"wmark_{generation_id}_{filename}"
+    output_path = os.path.join(output_dir, output_filename)
+
+    import main as _main
+    loop = asyncio.get_event_loop()
+    success = await loop.run_in_executor(
+        None, _main.apply_user_watermark,
+        input_path, logo_path, x_ratio, y_ratio, width_ratio, opacity, output_path)
+    if not success:
+        raise HTTPException(status_code=500, detail="Watermark overlay failed")
+
+    output_filename = await _deliver(request, req.job_id, output_filename)
+
+    # Update in-memory job + on-disk metadata.
+    if req.clip_index < len(job.get('result', {}).get('clips', [])):
+        job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+    try:
+        if req.clip_index < len(clips):
+            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+            data['shorts'] = clips
+            with open(json_files[0], 'w') as f:
+                json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Failed to update metadata.json: {e}")
+
+    _archive_clip_edit_bg(req.job_id, req.clip_index, output_filename)
+    return {"success": True,
+            "new_video_url": f"/videos/{req.job_id}/{output_filename}"}
+
+
+@app.post("/api/watermark/remove")
+async def remove_user_watermark(req: WatermarkRemoveRequest, request: Request):
+    """Point a clip back at its pre-watermark file (no re-encode).
+
+    The pipeline keeps the un-watermarked file next to the ``wmark_<ts>_``
+    derivation, so removing is just choosing the other file — same as
+    /api/subtitle/remove. No-op when no ``wmark_`` prefix is present.
+    """
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+    clips = data.get('shorts', [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    if req.input_filename:
+        filename = os.path.basename(req.input_filename)
+    else:
+        filename = (clips[req.clip_index].get('video_url') or '').split('/')[-1]
+        if not filename:
+            base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+            filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
+
+    filename = _strip_user_watermark(output_dir, filename)
+    if not os.path.exists(os.path.join(output_dir, filename)):
+        raise HTTPException(status_code=404, detail="The original clip is no longer available.")
+
+    filename = await _deliver(request, req.job_id, filename)
+    new_url = f"/videos/{req.job_id}/{filename}"
+    if req.clip_index < len(job.get('result', {}).get('clips', [])):
+        job['result']['clips'][req.clip_index]['video_url'] = new_url
+    try:
+        clips[req.clip_index]['video_url'] = new_url
+        data['shorts'] = clips
+        with open(json_files[0], 'w') as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"⚠️ Failed to update metadata.json: {e}")
+
+    _archive_clip_edit_bg(req.job_id, req.clip_index, filename)
+    return {"success": True, "new_video_url": new_url}
+
 
 class HookRequest(BaseModel):
     job_id: str
@@ -6859,6 +7029,41 @@ async def saasshorts_actor_upload(request: Request, file: UploadFile = File(...)
             f.write(content)
 
         return {"url": f"/videos/actor_uploads/{filename}"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/watermark/upload")
+async def watermark_upload(request: Request, file: UploadFile = File(...)):
+    """Upload a custom PNG watermark logo (stored locally under /videos)."""
+    await require_managed_entitlement(request)
+    if not file.content_type or file.content_type != "image/png":
+        raise HTTPException(status_code=400, detail="Watermark must be a PNG image")
+
+    try:
+        # Bounded read: a logo has no business being large. Cap it so an
+        # anonymous caller can't stream a multi-GB body into RAM (OOM DoS).
+        WATERMARK_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+        content = await file.read(WATERMARK_IMAGE_MAX_BYTES + 1)
+        if len(content) > WATERMARK_IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Image too large (max 10 MB)")
+        if len(content) < 100:
+            raise HTTPException(status_code=400, detail="File too small to be a valid image")
+
+        upload_id = uuid.uuid4().hex[:8]
+        upload_dir = os.path.join(OUTPUT_DIR, "watermark_uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        filename = f"wm_{upload_id}.png"
+        file_path = os.path.join(upload_dir, filename)
+
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        return {"filename": filename,
+                "url": f"/videos/watermark_uploads/{filename}"}
 
     except HTTPException:
         raise

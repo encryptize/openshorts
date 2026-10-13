@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Stamp } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch } from '../lib/api';
 import SubtitleModal from './SubtitleModal';
@@ -8,6 +8,7 @@ import TranslateModal from './TranslateModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
+import UserWatermarkModal from './UserWatermarkModal';
 import TikTokDraftNotice from './TikTokDraftNotice';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
@@ -213,6 +214,8 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const [isTranslating, setIsTranslating] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
+    const [showUserWatermarkModal, setShowUserWatermarkModal] = useState(false);
+    const [isWatermarking, setIsWatermarking] = useState(false);
     const [editError, setEditError] = useState(null);
 
     const [clipDuration, setClipDuration] = useState(() => {
@@ -417,6 +420,61 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             setTimeout(() => setEditError(null), 5000);
         } finally {
             setIsSubtitling(false);
+        }
+    };
+
+    const handleApplyUserWatermark = async ({ logo_filename, x_ratio, y_ratio, width_ratio, opacity }) => {
+        setIsWatermarking(true);
+        setEditError(null);
+        try {
+            const res = await apiFetch('/api/watermark/apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    job_id: jobId, clip_index: index, input_filename: serverVideoFile,
+                    logo_filename, x_ratio, y_ratio, width_ratio, opacity,
+                }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            const data = await res.json();
+            if (data.new_video_url) {
+                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                setServerVideoFile(data.new_video_url.split('/').pop());
+                if (videoRef.current) videoRef.current.load();
+            }
+            setShowUserWatermarkModal(false);
+        } catch (e) {
+            setEditError(e.message);
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsWatermarking(false);
+        }
+    };
+
+    const handleRemoveUserWatermark = async () => {
+        setIsWatermarking(true);
+        setEditError(null);
+        try {
+            const res = await apiFetch('/api/watermark/remove', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    job_id: jobId, clip_index: index, input_filename: serverVideoFile,
+                }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            const data = await res.json();
+            if (data.new_video_url) {
+                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                setServerVideoFile(data.new_video_url.split('/').pop());
+                if (videoRef.current) videoRef.current.load();
+            }
+            setShowUserWatermarkModal(false);
+        } catch (e) {
+            setEditError(e.message);
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsWatermarking(false);
         }
     };
 
@@ -974,6 +1032,15 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     </button>
 
                     <button
+                        onClick={() => setShowUserWatermarkModal(true)}
+                        disabled={isWatermarking}
+                        className={QUIET_BTN}
+                    >
+                        {isWatermarking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Stamp size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isWatermarking ? 'marking…' : 'watermark'}
+                    </button>
+
+                    <button
                         onClick={() => setShowModal(true)}
                         className="btn-primary flex-col gap-1 py-2.5 sm:py-2 px-1 text-[11px] leading-none rounded-input whitespace-nowrap"
                     >
@@ -1210,6 +1277,16 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     onContinue={downloadClip}
                 />
             )}
+
+            <UserWatermarkModal
+                isOpen={showUserWatermarkModal}
+                onClose={() => setShowUserWatermarkModal(false)}
+                serverVideoFile={serverVideoFile}
+                currentVideoUrl={currentVideoUrl}
+                onApply={handleApplyUserWatermark}
+                onRemove={handleRemoveUserWatermark}
+                isProcessing={isWatermarking}
+            />
 
         </div>
     );

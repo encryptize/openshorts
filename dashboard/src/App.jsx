@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Stamp } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import LlmConfigInput from './components/LlmConfigInput';
 import MediaInput from './components/MediaInput';
@@ -33,6 +33,7 @@ import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError, QUOTA_WALL_EVENT } from './lib/api';
 import { track } from './lib/analytics';
+import { getWatermarkPresets, removeWatermarkPreset } from './lib/watermarks';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -386,6 +387,45 @@ function App() {
   // Silent-success "saved" states for the settings key inputs (design.md: no alert popups)
   const [elevenLabsSaved, setElevenLabsSaved] = useState(false);
   const [falSaved, setFalSaved] = useState(false);
+  // Uploaded watermark PNGs (server-side) and preset list (localStorage).
+  const [watermarkUploads, setWatermarkUploads] = useState([]);
+  const [watermarkPresets, setWatermarkPresets] = useState(() => getWatermarkPresets());
+  const [watermarkUploading, setWatermarkUploading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const handleWatermarkUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.type !== 'image/png') {
+      alert('Watermark must be a PNG image.');
+      e.target.value = '';
+      return;
+    }
+    setWatermarkUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await apiFetch('/api/watermark/upload', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setWatermarkUploads((prev) => [...prev, { filename: data.filename, url: getApiUrl(data.url) }]);
+    } catch (err) {
+      alert('Upload failed: ' + err.message);
+    } finally {
+      setWatermarkUploading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleDeletePreset = (id) => {
+    setWatermarkPresets(removeWatermarkPreset(id));
+  };
+
+  // Refresh presets from localStorage when Settings is opened (presets may
+  // have been added from the ResultCard watermark modal on another tab).
+  useEffect(() => {
+    if (activeTab === 'settings') setWatermarkPresets(getWatermarkPresets());
+  }, [activeTab]);
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -1759,6 +1799,71 @@ function App() {
                       Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
                     </span>
                   </div>
+                </div>
+              </div>
+
+              <div className="card p-4 sm:p-6 mt-8">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
+                      <Stamp size={16} className="text-brass" />
+                    </div>
+                    <h2 className="text-base font-medium text-ink lowercase">Watermarks</h2>
+                  </div>
+                </div>
+                <p className="text-xs text-muted mb-6 leading-relaxed">
+                  Upload PNG logos to overlay on your clips. Drag them into position and save presets (position + size)
+                  from a clip's watermark button. Uploaded logos persist on the server; presets are stored in your browser.
+                </p>
+
+                <div className="space-y-4">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/png"
+                    onChange={handleWatermarkUpload}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={watermarkUploading}
+                    className="btn-quiet py-2 px-4 text-sm"
+                  >
+                    {watermarkUploading ? <><Loader2 size={14} className="animate-spin inline mr-1" /> uploading…</> : <><Upload size={14} className="inline mr-1" /> Upload PNG</>}
+                  </button>
+
+                  {watermarkUploads.length > 0 && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      {watermarkUploads.map((wm) => (
+                        <div key={wm.filename} className="border border-rule rounded-input p-2 flex flex-col items-center gap-2">
+                          <img src={wm.url} alt={wm.filename} className="max-h-16 object-contain" />
+                          <span className="text-[10px] text-muted break-all">{wm.filename}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {watermarkPresets.length > 0 && (
+                    <div className="mt-4">
+                      <p className="text-xs text-muted mb-2">Saved presets</p>
+                      <div className="space-y-2">
+                        {watermarkPresets.map((p) => (
+                          <div key={p.id} className="flex items-center gap-3 border border-rule rounded-input p-2">
+                            <img src={p.logoUrl} alt={p.name} className="w-8 h-8 object-contain shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-ink2 truncate">{p.name}</p>
+                              <p className="text-[10px] text-muted">
+                                x:{Math.round(p.xRatio * 100)}% y:{Math.round(p.yRatio * 100)}% w:{Math.round(p.widthRatio * 100)}% op:{Math.round(p.opacity * 100)}%
+                              </p>
+                            </div>
+                            <button onClick={() => handleDeletePreset(p.id)} className="text-muted hover:text-error transition-colors p-1">
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
